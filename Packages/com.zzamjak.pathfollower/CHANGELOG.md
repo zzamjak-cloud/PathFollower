@@ -3,6 +3,12 @@
 이 프로젝트의 주요 변경 사항을 기록합니다.
 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따르며, [Semantic Versioning](https://semver.org/lang/ko/)을 준수합니다.
 
+## [1.0.1] - 2026-08-15
+
+### Changed
+
+- 리포지토리를 개발용 Unity 프로젝트 + 임베디드 패키지 구조로 전환 (설치 URL 경로 변경: ?path=/Packages/com.zzamjak.pathfollower)
+
 ## [1.0.0] - 2026-08-04
 
 ### Added

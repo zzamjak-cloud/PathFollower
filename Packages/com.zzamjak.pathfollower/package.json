@@ -1,7 +1,7 @@
 {
   "name": "com.zzamjak.pathfollower",
   "displayName": "PathFollower",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "unity": "6000.0",
   "description": "런타임에서 자유롭게 경로를 수정할 수 있는 베지어 곡선 경로 추종 컴포넌트입니다. 경로 프리셋(원/다각형/별), 스냅샷 모핑, 독립 타이밍 에이전트, Tiling 스프라이트 리본(PathRibbon)을 제공합니다.",
   "documentationUrl": "https://github.com/zzamjak-cloud/PathFollower",

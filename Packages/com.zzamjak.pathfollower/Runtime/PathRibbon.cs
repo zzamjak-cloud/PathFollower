@@ -31,8 +31,11 @@ namespace CAT.Utility
     {
         #region 직렬화 필드
 
-        [Tooltip("컨베이어 벨트 스크롤 속도 (units/sec, UI 모드에서는 px/sec). 음수 = 역방향. Loop 경로에서만 동작")]
-        public float scrollSpeed = 0f;
+        [Tooltip("리본 텍스처를 컨베이어 벨트처럼 흐르게 한다. 속도는 PathFollower Duration 에서 자동 계산 (경로 길이 ÷ Duration = 팔로워 이동 속도와 동일). Loop 경로에서만 동작")]
+        public bool enableScroll = true;
+
+        [Tooltip("스크롤 방향 반전")]
+        public bool invertScroll = false;
 
         [Tooltip("경로 길이 1유닛당 샘플 정점 개수 (자동 모드). UI 모드에서는 100px = 1유닛으로 환산")]
         [Min(0.1f)] public float samplesPerUnit = 10f;
@@ -128,6 +131,11 @@ namespace CAT.Utility
         // UV 스크롤
         private float _uOffset;
 
+#if UNITY_EDITOR
+        // 에디트 모드 스크롤 미리보기용 마지막 갱신 시각 (-1 = 초기화 필요)
+        [System.NonSerialized] private double _lastEditorScrollTime = -1.0;
+#endif
+
         #endregion
 
         #region 공개 프로퍼티
@@ -164,6 +172,9 @@ namespace CAT.Utility
         protected override void OnDisable()
         {
             base.OnDisable();
+#if UNITY_EDITOR
+            _lastEditorScrollTime = -1.0; // 재활성화 시 dt 점프 방지
+#endif
             if (_meshRenderer != null) _meshRenderer.enabled = false;
             // 자식 렌더러 원래 상태 복구 (PathRibbon 이 꺼지면 사용자가 직접 자식을 볼 수 있어야 함)
             RestoreChildOriginalState();
@@ -262,17 +273,63 @@ namespace CAT.Utility
 
             if (needsRebuild) RebuildMesh();
 
-            // UV 스크롤 (플레이 모드 + Loop 경로 한정)
-            if (Application.isPlaying
+            // UV 스크롤 (Loop 경로 한정. 플레이 모드 또는 명시적 에디터 테스트 중에만 동작)
+            // 속도는 별도 필드가 아닌 PathFollower Duration 에서 자동 계산:
+            // 경로 길이 ÷ Duration = 팔로워 이동 속도와 동일하게 흐른다.
+            bool canAnimateScroll = Application.isPlaying;
+#if UNITY_EDITOR
+            canAnimateScroll = canAnimateScroll || _follower.isTestMode;
+#endif
+            bool canScroll = enableScroll
+                && canAnimateScroll
                 && _follower.IsLoopEnabled
-                && Mathf.Abs(scrollSpeed) > 1e-6f
+                && _follower.duration > 1e-4f
+                && _totalLength > 1e-6f
                 && _effectiveTileLength > 1e-6f
-                && _sampleCount >= 2)
+                && _sampleCount >= 2;
+
+            if (canScroll)
             {
-                _uOffset += (scrollSpeed * Time.deltaTime) / _effectiveTileLength;
-                _uOffset -= Mathf.Floor(_uOffset);
-                ApplyScrollUV();
+                float dt;
+                if (Application.isPlaying)
+                {
+                    dt = Time.deltaTime;
+                }
+                else
+                {
+#if UNITY_EDITOR
+                    // 에디트 모드: Time.deltaTime 이 0이므로 에디터 시계로 dt 계산
+                    double now = UnityEditor.EditorApplication.timeSinceStartup;
+                    dt = _lastEditorScrollTime < 0.0 ? 0f : (float)(now - _lastEditorScrollTime);
+                    _lastEditorScrollTime = now;
+#else
+                    dt = 0f;
+#endif
+                }
+
+                if (dt > 0f)
+                {
+                    float speed = _totalLength / _follower.duration * (invertScroll ? -1f : 1f);
+                    _uOffset += (speed * dt) / _effectiveTileLength;
+                    _uOffset -= Mathf.Floor(_uOffset);
+                    ApplyScrollUV();
+                }
+
+#if UNITY_EDITOR
+                // 에디트 모드에서 지속 갱신 유도: 다음 플레이어 루프 실행 + SceneView 리페인트
+                if (!Application.isPlaying)
+                {
+                    UnityEditor.EditorApplication.QueuePlayerLoopUpdate();
+                    UnityEditor.SceneView.RepaintAll();
+                }
+#endif
             }
+#if UNITY_EDITOR
+            else
+            {
+                _lastEditorScrollTime = -1.0;
+            }
+#endif
         }
 
         #endregion
@@ -585,9 +642,11 @@ namespace CAT.Utility
             //    UI 모드의 로컬 단위는 픽셀이므로 100px = 1유닛으로 환산하여 샘플 밀도 유지
             float prelimLength = EstimatePathLength(32);
             float unitLength = _isUIMode ? prelimLength / UISampleUnitPixels : prelimLength;
+            // 자동 모드 최소 샘플 32 보장: 수 유닛 미만의 작은 경로에서 샘플 부족으로
+            // 리본이 다각형처럼 각져 보이는 문제 방지 (곡률은 경로 크기와 무관하게 존재)
             int baseSampleCount = overrideSamples
                 ? Mathf.Max(4, manualSamples)
-                : Mathf.Clamp(Mathf.CeilToInt(unitLength * samplesPerUnit), 4, 4096);
+                : Mathf.Clamp(Mathf.CeilToInt(unitLength * samplesPerUnit), 32, 4096);
 
             // Loop 경로는 이음매에서 UV 연속성을 위해 마지막 정점을 한 번 더 추가
             int vertexSampleCount = isLoop ? baseSampleCount + 1 : baseSampleCount;

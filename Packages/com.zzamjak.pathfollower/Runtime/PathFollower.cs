@@ -255,6 +255,8 @@ namespace CAT.Utility
         private void OnValidate()
         {
             _transformDirty = true;
+            if (!Application.isPlaying) return;
+
             if (_points != null && _points.Count >= 2)
             {
                 UpdatePosition();
@@ -830,6 +832,167 @@ namespace CAT.Utility
         {
             if (_points == null || index < 0 || index >= _points.Count) return;
             RelaxPointInternal(index);
+            MarkDirty();
+        }
+
+        /// <summary>
+        /// 경로 형태는 유지하면서 정점을 호 길이 기준 균일 간격으로 재배치하고,
+        /// 핸들을 Catmull-Rom 방식으로 재계산한다. 정점 개수는 유지된다.
+        /// 정점 간격 불균일로 인한 이동 속도 편차와 리본 메시 왜곡 해소용.
+        /// </summary>
+        public void ResamplePathUniform()
+        {
+            if (_points == null || _points.Count < 3) return;
+
+            int count = _points.Count;
+            int segs  = _isLoop ? count : count - 1;
+
+            // 로컬(path 좌표) 3차 베지어 평가 — 캐시/Transform 상태와 무관하게 동작
+            Vector3 EvalLocalAt(float t)
+            {
+                float segmentT = t * segs;
+                int i = Mathf.FloorToInt(segmentT);
+                if (i >= segs) { i = segs - 1; segmentT = 1f; }
+                else segmentT -= i;
+
+                int ni = (_isLoop && i == count - 1) ? 0 : i + 1;
+                Vector3 p0 = _points[i].position;
+                Vector3 p1 = _points[i].handleOut;
+                Vector3 p2 = _points[ni].handleIn;
+                Vector3 p3 = _points[ni].position;
+
+                float u = 1f - segmentT;
+                return u * u * u * p0
+                     + 3f * u * u * segmentT * p1
+                     + 3f * u * segmentT * segmentT * p2
+                     + segmentT * segmentT * segmentT * p3;
+            }
+
+            // 전역 파라미터 t 기준 도함수 dB/dt (비정규화) — 에르미트 → 베지어 변환용
+            Vector3 EvalLocalDerivativeAt(float t)
+            {
+                float segmentT = t * segs;
+                int i = Mathf.FloorToInt(segmentT);
+                if (i >= segs) { i = segs - 1; segmentT = 1f; }
+                else segmentT -= i;
+
+                int ni = (_isLoop && i == count - 1) ? 0 : i + 1;
+                Vector3 p0 = _points[i].position;
+                Vector3 p1 = _points[i].handleOut;
+                Vector3 p2 = _points[ni].handleIn;
+                Vector3 p3 = _points[ni].position;
+
+                float u = 1f - segmentT;
+                Vector3 dSeg = 3f * u * u * (p1 - p0)
+                             + 6f * u * segmentT * (p2 - p1)
+                             + 3f * segmentT * segmentT * (p3 - p2);
+                return dSeg * segs; // segmentT = t × segs 이므로 체인룰로 전역 t 기준 환산
+            }
+
+            // 1) 조밀 샘플링 + 누적 호 길이 테이블 (세그먼트당 64 샘플)
+            int denseCount = segs * 64;
+            var samplePos = new Vector3[denseCount + 1];
+            var cumLen    = new float[denseCount + 1];
+            samplePos[0] = EvalLocalAt(0f);
+            for (int k = 1; k <= denseCount; k++)
+            {
+                samplePos[k] = EvalLocalAt((float)k / denseCount);
+                cumLen[k]    = cumLen[k - 1] + Vector3.Distance(samplePos[k - 1], samplePos[k]);
+            }
+
+            float totalLen = cumLen[denseCount];
+            if (totalLen < 1e-5f) return;
+
+            // 호 길이 s 위치의 곡선 위 좌표와 전역 파라미터를 반환 (이분 탐색)
+            Vector3 PosOnArc(float s, out float tGlobal)
+            {
+                s = Mathf.Clamp(s, 0f, totalLen);
+                int lo = 0, hi = denseCount - 1;
+                while (lo < hi)
+                {
+                    int mid = (lo + hi) >> 1;
+                    if (cumLen[mid + 1] < s) lo = mid + 1;
+                    else hi = mid;
+                }
+                float segLen = cumLen[lo + 1] - cumLen[lo];
+                float frac   = segLen > 1e-8f ? (s - cumLen[lo]) / segLen : 0f;
+                tGlobal = (lo + frac) / denseCount;
+                return Vector3.LerpUnclamped(samplePos[lo], samplePos[lo + 1], frac);
+            }
+
+            // 2) 균일 호 길이 지점의 위치·단위 접선 추출 (원본 곡선 기준, 변형 전에 전부 계산)
+            var newPositions = new Vector3[count];
+            var newTangents  = new Vector3[count];
+            for (int i = 0; i < count; i++)
+            {
+                float target = _isLoop
+                    ? totalLen * i / count
+                    : totalLen * i / (count - 1);
+
+                newPositions[i] = PosOnArc(target, out float tp);
+                Vector3 d = EvalLocalDerivativeAt(tp);
+                newTangents[i] = d.sqrMagnitude > 1e-12f ? d.normalized : Vector3.right;
+            }
+            // 시작점(및 비루프 끝점)은 원본 좌표 그대로 유지 (부동소수 오차 방지)
+            newPositions[0] = _points[0].position;
+            if (!_isLoop) newPositions[count - 1] = _points[count - 1].position;
+
+            // 3) 세그먼트별 호 중간점 M 도 변형 전에 미리 추출
+            float segArc = _isLoop ? totalLen / count : totalLen / (count - 1);
+            var midPoints = new Vector3[segs];
+            for (int i = 0; i < segs; i++)
+            {
+                float arcStart = _isLoop ? totalLen * i / count : totalLen * i / (count - 1);
+                midPoints[i] = PosOnArc(arcStart + segArc * 0.5f, out _);
+            }
+
+            // 4) 위치 반영 + 핸들 계산: 양 끝 접선 방향은 원본 곡선에서 고정하고,
+            //    베지어가 호 중간점 M 을 통과하도록 핸들 길이(α, β)를 최소제곱으로 푼다.
+            //    B(0.5) = (P0+P3)/2 + 3/8·(αT0 − βT1) = M  →  αT0 − βT1 = R
+            for (int i = 0; i < count; i++)
+                _points[i].position = newPositions[i];
+
+            float fallbackLen = segArc / 3f;
+            for (int i = 0; i < segs; i++)
+            {
+                int ni = (_isLoop && i == count - 1) ? 0 : i + 1;
+                Vector3 p0 = newPositions[i];
+                Vector3 p3 = newPositions[ni];
+                Vector3 t0 = newTangents[i];
+                Vector3 t1 = newTangents[ni];
+
+                Vector3 r = (midPoints[i] - (p0 + p3) * 0.5f) * (8f / 3f);
+                float dot = Vector3.Dot(t0, t1);
+                float det = 1f - dot * dot;
+
+                float alpha = fallbackLen;
+                float beta  = fallbackLen;
+                if (det > 1e-4f)
+                {
+                    float r0 = Vector3.Dot(t0, r);
+                    float r1 = Vector3.Dot(t1, r);
+                    alpha = (r0 - dot * r1) / det;
+                    beta  = (dot * r0 - r1) / det;
+                    // 비정상 해(음수·과대)는 균등 폴백으로 대체
+                    float maxLen = segArc * 1.5f;
+                    if (alpha <= 0f || alpha > maxLen) alpha = fallbackLen;
+                    if (beta  <= 0f || beta  > maxLen) beta  = fallbackLen;
+                }
+
+                _points[i].handleOut = p0 + t0 * alpha;
+                _points[ni].handleIn = p3 - t1 * beta;
+                _points[i].isBroken  = false;
+            }
+
+            // 비루프 끝점: 사용되지 않는 반대쪽 핸들을 미러로 정리
+            if (!_isLoop)
+            {
+                _points[0].handleIn = _points[0].position - (_points[0].handleOut - _points[0].position);
+                int last = count - 1;
+                _points[last].handleOut = _points[last].position - (_points[last].handleIn - _points[last].position);
+                _points[last].isBroken  = false;
+            }
+
             MarkDirty();
         }
 

@@ -13,7 +13,8 @@ using CAT.Utility;
 [CanEditMultipleObjects]
 public class PathRibbonEditor : Editor
 {
-        private SerializedProperty _scrollSpeedProp;
+        private SerializedProperty _enableScrollProp;
+        private SerializedProperty _invertScrollProp;
         private SerializedProperty _samplesPerUnitProp;
         private SerializedProperty _overrideSamplesProp;
         private SerializedProperty _manualSamplesProp;
@@ -21,7 +22,8 @@ public class PathRibbonEditor : Editor
         private SerializedProperty _flipXProp;
         private SerializedProperty _flipYProp;
 
-        private static readonly GUIContent LabelScrollSpeed   = new GUIContent("Scroll Speed", "Loop 경로에서 UV 스크롤 속도 (units/sec). 음수 = 역방향");
+        private static readonly GUIContent LabelEnableScroll  = new GUIContent("Scroll (Conveyor)", "리본 텍스처를 컨베이어처럼 흐르게 합니다. 속도는 PathFollower Duration 에서 자동 계산 (경로 길이 ÷ Duration). Loop 경로에서만 동작");
+        private static readonly GUIContent LabelInvertScroll  = new GUIContent("Invert Direction", "스크롤 방향 반전");
         private static readonly GUIContent LabelSamplesPerU   = new GUIContent("Samples / Unit", "경로 1유닛당 정점 개수 (자동 모드)");
         private static readonly GUIContent LabelOverride      = new GUIContent("Override Samples", "샘플 개수를 수동으로 지정");
         private static readonly GUIContent LabelManualSamples = new GUIContent("Manual Samples", "수동 샘플 개수");
@@ -31,7 +33,8 @@ public class PathRibbonEditor : Editor
 
         private void OnEnable()
         {
-            _scrollSpeedProp    = serializedObject.FindProperty(nameof(PathRibbon.scrollSpeed));
+            _enableScrollProp   = serializedObject.FindProperty(nameof(PathRibbon.enableScroll));
+            _invertScrollProp   = serializedObject.FindProperty(nameof(PathRibbon.invertScroll));
             _samplesPerUnitProp = serializedObject.FindProperty(nameof(PathRibbon.samplesPerUnit));
             _overrideSamplesProp= serializedObject.FindProperty(nameof(PathRibbon.overrideSamples));
             _manualSamplesProp  = serializedObject.FindProperty(nameof(PathRibbon.manualSamples));
@@ -48,7 +51,11 @@ public class PathRibbonEditor : Editor
 
             // ── 기본 설정 ──
             EditorGUILayout.LabelField("Ribbon", EditorStyles.boldLabel);
-            EditorGUILayout.PropertyField(_scrollSpeedProp, LabelScrollSpeed);
+            EditorGUILayout.PropertyField(_enableScrollProp, LabelEnableScroll);
+            using (new EditorGUI.DisabledScope(!_enableScrollProp.boolValue))
+            {
+                EditorGUILayout.PropertyField(_invertScrollProp, LabelInvertScroll);
+            }
 
             // Flip 가로/세로 — 가로형 토글 레이아웃
             using (new EditorGUILayout.HorizontalScope())
@@ -102,20 +109,26 @@ public class PathRibbonEditor : Editor
                 EditorGUILayout.IntField("Sample Count", ribbon.ActualSampleCount);
                 EditorGUILayout.FloatField("Total Path Length", ribbon.TotalPathLength);
                 EditorGUILayout.FloatField("Effective Tile Length", ribbon.EffectiveTileLength);
+
+                // 자동 계산된 스크롤 속도 표시 (경로 길이 ÷ PathFollower Duration)
+                var follower = ribbon.GetComponent<PathFollower>();
+                float autoSpeed = (follower != null && follower.duration > 1e-4f)
+                    ? ribbon.TotalPathLength / follower.duration
+                    : 0f;
+                EditorGUILayout.FloatField("Scroll Speed (auto)", autoSpeed);
             }
         }
 
         private void DrawWarnings(PathRibbon ribbon)
         {
-            // Scroll Speed 는 닫힌(Loop) 경로 + 플레이 모드에서만 동작
-            if (!Mathf.Approximately(ribbon.scrollSpeed, 0f))
+            // 스크롤은 닫힌(Loop) 경로에서만 동작
+            if (ribbon.enableScroll)
             {
                 var follower = ribbon.GetComponent<PathFollower>();
                 if (follower != null && !follower.IsLoop)
                 {
                     EditorGUILayout.HelpBox(
-                        "Scroll Speed(UV 스크롤)는 닫힌(Loop) 경로에서만 동작합니다. PathFollower 의 Loop 를 켜세요. " +
-                        "(스크롤 애니메이션은 플레이 모드에서만 재생됩니다)",
+                        "스크롤(컨베이어)은 닫힌(Loop) 경로에서만 동작합니다. PathFollower 의 Loop 를 켜세요.",
                         MessageType.Warning);
                 }
             }
@@ -165,6 +178,45 @@ public class PathRibbonEditor : Editor
                     MessageType.Warning);
             }
 
+            // 리본 두께 vs 경로 곡률 검사 (Sprite 모드, Tiled)
+            // Tiled 전환 직후 Size 는 스프라이트 크기와 무관한 (1,1)이 기본값이라,
+            // 작은 경로에서는 두께 절반이 곡률 반경을 넘어 메시가 자가 교차(별/부채꼴 붕괴)하기 쉽다.
+            if (foundSR != null && foundSR.drawMode == SpriteDrawMode.Tiled && foundSR.sprite != null)
+            {
+                var pathFollower = ribbon.GetComponent<PathFollower>();
+                if (pathFollower != null && pathFollower.PointCount >= 2)
+                {
+                    float minRadius = EstimateMinCurvatureRadius(pathFollower, ribbon.transform.parent);
+                    float halfWidth = foundSR.size.y * 0.5f;
+
+                    if (minRadius < float.MaxValue && halfWidth > minRadius)
+                    {
+                        EditorGUILayout.HelpBox(
+                            $"리본 두께(자식 Size Y = {foundSR.size.y:F2})의 절반이 경로 최소 곡률 반경({minRadius:F2})보다 큽니다.\n" +
+                            "안쪽 정점이 곡률 중심을 넘어가 메시가 자가 교차(별/부채꼴 모양으로 붕괴)합니다.\n" +
+                            "Size Y 를 줄이거나 경로를 크게 만드세요.",
+                            MessageType.Warning);
+                    }
+
+                    // Size 가 스프라이트 원본 크기와 다르면 원클릭 보정 버튼 제공
+                    Sprite sp = foundSR.sprite;
+                    Vector2 native = new Vector2(
+                        sp.rect.width  / Mathf.Max(0.0001f, sp.pixelsPerUnit),
+                        sp.rect.height / Mathf.Max(0.0001f, sp.pixelsPerUnit));
+                    if (Vector2.Distance(foundSR.size, native) > 1e-4f)
+                    {
+                        if (GUILayout.Button($"자식 Size를 스프라이트 원본 크기로 ({native.x:F2} × {native.y:F2})"))
+                        {
+                            Undo.RecordObject(foundSR, "Set Sprite Native Size");
+                            foundSR.size = native;
+                            EditorUtility.SetDirty(foundSR);
+                            ribbon.MarkDirty();
+                            SceneView.RepaintAll();
+                        }
+                    }
+                }
+            }
+
             // URP 2D Sprite 셰이더는 MeshRenderer 비호환 → 폴백 material 자동 대체 안내
             if (foundSR != null && PathRibbon.IsSpriteOnlyShader(foundSR.sharedMaterial))
             {
@@ -185,5 +237,35 @@ public class PathRibbonEditor : Editor
                     "Sprite의 Texture Wrap Mode 가 Repeat 이 아니면 타일링이 끊어질 수 있습니다. Texture Import 설정에서 Wrap Mode = Repeat 로 변경하세요.",
                     MessageType.Info);
             }
+        }
+
+        /// <summary>
+        /// 경로의 최소 곡률 반경을 경로 공간(부모 로컬) 기준으로 추정한다.
+        /// 연속 샘플 간 호 길이(ds)와 접선 회전각(dθ)으로 반경 = ds/dθ 근사.
+        /// </summary>
+        private static float EstimateMinCurvatureRadius(PathFollower follower, Transform parentSpace)
+        {
+            Matrix4x4 worldToPath = parentSpace != null ? parentSpace.worldToLocalMatrix : Matrix4x4.identity;
+            const int SampleCount = 64;
+
+            Vector3 prevPos = worldToPath.MultiplyPoint3x4(follower.GetPointAt(0f));
+            Vector3 prevDir = worldToPath.MultiplyVector(follower.GetDirectionAt(0f)).normalized;
+            float minRadius = float.MaxValue;
+
+            for (int i = 1; i <= SampleCount; i++)
+            {
+                float t = (float)i / SampleCount;
+                Vector3 pos = worldToPath.MultiplyPoint3x4(follower.GetPointAt(t));
+                Vector3 dir = worldToPath.MultiplyVector(follower.GetDirectionAt(t)).normalized;
+
+                float ds     = (pos - prevPos).magnitude;
+                float dTheta = Vector3.Angle(prevDir, dir) * Mathf.Deg2Rad;
+                if (dTheta > 1e-4f && ds > 1e-6f)
+                    minRadius = Mathf.Min(minRadius, ds / dTheta);
+
+                prevPos = pos;
+                prevDir = dir;
+            }
+            return minRadius;
         }
     }

@@ -17,7 +17,7 @@ https://github.com/zzamjak-cloud/PathFollower.git?path=/Packages/com.zzamjak.pat
 특정 버전 설치:
 
 ```
-https://github.com/zzamjak-cloud/PathFollower.git?path=/Packages/com.zzamjak.pathfollower#v1.0.1
+https://github.com/zzamjak-cloud/PathFollower.git?path=/Packages/com.zzamjak.pathfollower#v1.0.2
 ```
 
 
@@ -351,7 +351,7 @@ PathFollower 경로를 따라 **Tiling 스프라이트 리본 메시**를 생성
   - **한 타일 길이(경로 방향)** = 스프라이트의 네이티브 너비 (= `sprite.rect.width / pixelsPerUnit`). Unity의 SpriteRenderer Tiled 모드와 동일 방식(한 장 = 네이티브 크기).
   - **리본 두께(경로 수직)** = SpriteRenderer의 `size.y` 또는 Image RectTransform 높이.
 - **Loop 이음매 자동 보정**: Loop 경로에서는 타일 개수를 반올림해 `effectiveTileLength = totalLength / tileCount` 로 조정 → 이음매 완전 연결.
-- **UV 스크롤 (Loop 경로 한정)**: `scrollSpeed` (units/sec) 필드로 컨베이어 벨트 연출.
+- **UV 스크롤 (Loop 경로 한정)**: `enableScroll` 토글로 컨베이어 벨트 연출. 속도는 PathFollower 의 `duration` 에서 자동 계산 (경로 길이 ÷ Duration = 팔로워 이동 속도와 동일). 에디트 모드에서도 씬뷰 미리보기 지원.
 - **셰이더 자동 대체 (Sprite 모드)**: URP 기본 스프라이트 셰이더(`Sprite-Unlit-Default`, `Sprite-Lit-Default`)는 SpriteRenderer 전용 내장값(`unity_SpriteProps`/`unity_SpriteColor`)에 의존해 **MeshRenderer 에서 렌더링되지 않으므로**, 전용 폴백 셰이더 `CAT/PathFollower/Ribbon-Unlit` 로 자동 대체됨. 커스텀 material 을 지정하면 그대로 사용. UI 모드는 자식 Image 의 material 사용, SoftMask / SoftMaskLight 는 `materialForRendering` 체인으로 자동 처리.
 
 ### 사용법
@@ -367,7 +367,8 @@ PathFollower 경로를 따라 **Tiling 스프라이트 리본 메시**를 생성
 
 | 필드 | 설명 |
 |------|------|
-| `scrollSpeed` | 컨베이어 스크롤 속도 (units/sec, UI 모드에서는 px/sec). 음수 = 역방향. **Loop 경로에서만** 동작 |
+| `enableScroll` | 컨베이어 스크롤 켜기/끄기 (기본 `true`). 속도 = 경로 길이 ÷ PathFollower `duration`. **Loop 경로에서만** 동작 |
+| `invertScroll` | 스크롤 방향 반전 |
 | `flipX` | 가로(경로 방향) UV 반전. Sprite 모드에서는 자식 `SpriteRenderer.flipX` 와 XOR 결합 |
 | `flipY` | 세로(리본 두께) UV 반전. Sprite 모드에서는 자식 `SpriteRenderer.flipY` 와 XOR 결합 |
 | `samplesPerUnit` | 경로 1유닛당 샘플 정점 개수 (자동 모드, 기본 10). UI 모드에서는 100px = 1유닛으로 환산 |
@@ -382,9 +383,10 @@ PathFollower 경로를 따라 **Tiling 스프라이트 리본 메시**를 생성
 ```csharp
 PathRibbon ribbon = GetComponent<PathRibbon>();
 
-// 스크롤 속도 변경 (음수 = 역방향 흐름)
-ribbon.scrollSpeed = 2f;
-ribbon.scrollSpeed = -2f;  // 반대 방향
+// 컨베이어 스크롤 제어 (속도는 PathFollower.duration 에서 자동 계산)
+ribbon.enableScroll = true;    // 스크롤 켜기
+ribbon.invertScroll = true;    // 반대 방향
+// 속도를 바꾸려면 PathFollower 의 duration 을 조정 (짧을수록 빠름)
 
 // 이미지 반전 (UV flip) — 정적인 텍스처 방향 뒤집기
 ribbon.flipX = true;   // 경로 방향 UV 반전
@@ -408,19 +410,19 @@ float totalLen = ribbon.TotalPathLength;
 | 제어 | 방법 | 효과 |
 |------|------|------|
 | **이미지 정적 반전** | `flipX` / `flipY` (PathRibbon) 또는 자식 `SpriteRenderer.flipX/flipY` | UV 공간 반전 — 타일 배치 방향이 뒤집힘. 정지 상태에서 확인 가능 |
-| **이동 방향 반전** | `scrollSpeed` 를 음수로 | UV 스크롤 방향이 뒤집힘 (Loop 경로 한정) |
+| **이동 방향 반전** | `invertScroll = true` | UV 스크롤 방향이 뒤집힘 (Loop 경로 한정) |
 
 Sprite 모드에서는 PathRibbon의 `flipX/Y` 와 자식 SpriteRenderer 의 `flipX/Y` 가 **XOR 결합**됩니다. 둘 다 true면 다시 원본 방향(false 처럼).
 
 ```csharp
 // 예시: 런타임에 런닝 리본 방향 전환
-ribbon.flipX = !ribbon.flipX;          // 타일 방향 뒤집기
-ribbon.scrollSpeed = -ribbon.scrollSpeed; // 이동 방향도 뒤집기
+ribbon.flipX = !ribbon.flipX;               // 타일 방향 뒤집기
+ribbon.invertScroll = !ribbon.invertScroll; // 이동 방향도 뒤집기
 ```
 
 ### 주의 사항
 
-- **Scroll Speed 는 Loop 경로 + 플레이 모드 전용**: `scrollSpeed` 는 PathFollower 의 **Loop(닫힌 경로)가 켜져 있어야** 동작하며, 스크롤 애니메이션은 **플레이 모드에서만** 재생됩니다. 인스펙터에 경고가 표시됩니다.
+- **스크롤은 Loop 경로 전용**: 컨베이어 스크롤은 PathFollower 의 **Loop(닫힌 경로)가 켜져 있어야** 동작합니다. 속도는 `경로 길이 ÷ duration` 으로 자동 계산되며, 플레이 모드와 에디트 모드(씬뷰 미리보기) 모두에서 재생됩니다. 인스펙터에 경고가 표시됩니다.
 - **Sprite 모드에서 URP 기본 스프라이트 material 은 자동 대체됨**: MeshRenderer 는 `Sprite-Unlit-Default` 등 URP 2D Sprite 셰이더를 렌더링할 수 없어(SpriteRenderer 전용 내장값 의존 → 정점 붕괴/알파 0), 패키지에 포함된 폴백 셰이더 `Runtime/Resources/PathRibbonUnlit.shader` (`CAT/PathFollower/Ribbon-Unlit`) 기반 공유 material 로 자동 대체됩니다. 삭제하지 마세요.
 - **Wrap Mode = Repeat 필수**: 스프라이트가 아틀라스에 포함돼 있으면 UV 가 `[0..1]` 전체 영역이 아니라 아틀라스 내 서브영역이라 Repeat 동작이 불가합니다. 리본 전용 스프라이트는 **독립 텍스처로 Import** 하세요. 인스펙터에서 wrap 모드 경고가 표시됩니다.
 - **Draw Mode = Tiled / Image Type = Tiled 권장**: Size.y(리본 두께)를 사용하려면 자식 컴포넌트가 Tiled 모드여야 합니다. SpriteRenderer가 Simple 모드면 네이티브 스프라이트 높이가 두께로 사용됩니다.

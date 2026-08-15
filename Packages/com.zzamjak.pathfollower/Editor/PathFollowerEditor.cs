@@ -18,6 +18,7 @@ public class PathFollowerEditor : Editor
     private const float POINT_SIZE        = 0.18f;  // 포인트 크기 배율
     private const float TEST_DURATION     = 10f;    // 에디터 테스트 재생 시간 (초)
     private const float MAX_ADD_DIST_MULT = 0.5f;   // 세그먼트 추가 허용 최대 거리 배율
+    private const double TEST_RESTART_SUPPRESS_SECONDS = 0.25d; // 버튼 교체 직후 남은 MouseUp 재입력 방지
 
     private static readonly Color ColorPath         = new Color(0.2f, 1f, 0.2f);
     private static readonly Color ColorPoint        = new Color(1f, 1f, 1f);
@@ -59,9 +60,14 @@ public class PathFollowerEditor : Editor
     private Vector2 _boxStart;
     private Vector2 _boxEnd;
 
+    // Alt 호버 미리보기 (+ 아이콘)
+    private bool    _altHoverValid = false;
+    private Vector3 _altHoverWorldPos;
+
     // 에디터 테스트
     private bool   _isTestPlaying = false;
     private double _testStartTime;
+    private double _suppressTestStartUntil;
 
     // ── 경로 도구: 프리셋 타입 선택 ─────────────────────────
     private PresetType _selectedPreset = PresetType.None;
@@ -210,16 +216,7 @@ public class PathFollowerEditor : Editor
         if (_selectedIndices.Count >= 1)
             DrawSelectionTransformTools();
         else
-            EditorGUILayout.HelpBox(
-                "SceneView 조작 방법:\n" +
-                "  클릭 - 선택 / Shift+클릭 - 추가 선택\n" +
-                "  Ctrl+A - 전체 선택 (스냅샷용 회전·스케일)\n" +
-                "  클릭+드래그 - 즉시 이동\n" +
-                "  Alt+클릭(곡선) - 그 위치에 포인트 삽입\n" +
-                "  Ctrl+드래그 - 박스 선택\n" +
-                "  우클릭(포인트) - 컨텍스트 메뉴\n" +
-                "  R키 - 핸들 회전 모드 토글",
-                MessageType.None);
+            EditorGUILayout.LabelField("조작법: SceneView 좌측 하단 가이드 오버레이 참고", EditorStyles.miniLabel);
     }
 
     private void DrawPointInfoBox(int index)
@@ -411,8 +408,9 @@ public class PathFollowerEditor : Editor
 
         EditorGUILayout.Space(4);
 
-        // ── 핸들 자동 조정 (Relax) ────────────────────────────
+        // ── 핸들 자동 조정 (Relax) / 정점 균일화 ──────────────
         EditorGUILayout.LabelField("핸들 자동 조정 (Relax)", EditorStyles.miniLabel);
+        EditorGUILayout.BeginHorizontal();
         if (GUILayout.Button("전체 Relax"))
         {
             Undo.RecordObject(_follower, "Relax Path");
@@ -420,6 +418,15 @@ public class PathFollowerEditor : Editor
             EditorUtility.SetDirty(_follower);
             SceneView.RepaintAll();
         }
+        if (GUILayout.Button(new GUIContent("정점 균일화",
+            "경로 형태는 유지하면서 정점을 호 길이 기준 균일 간격으로 재배치하고 핸들을 재계산합니다.\n정점 간격 불균일로 인한 리본 메시 왜곡 해소용.")))
+        {
+            Undo.RecordObject(_follower, "Resample Path Uniform");
+            _follower.ResamplePathUniform();
+            EditorUtility.SetDirty(_follower);
+            SceneView.RepaintAll();
+        }
+        EditorGUILayout.EndHorizontal();
     }
 
     /// <summary>프리셋 타입 라디오 버튼 그리기</summary>
@@ -846,7 +853,8 @@ public class PathFollowerEditor : Editor
         }
         else
         {
-            EditorGUI.BeginDisabledGroup(_follower == null || _follower.PointCount < 2);
+            bool suppressRestart = EditorApplication.timeSinceStartup < _suppressTestStartUntil;
+            EditorGUI.BeginDisabledGroup(_follower == null || _follower.PointCount < 2 || suppressRestart);
             var prevBg = GUI.backgroundColor;
             GUI.backgroundColor = Color.green;
             if (GUILayout.Button($"▶ {TEST_DURATION:F0}초 테스트", GUILayout.Height(30)))
@@ -871,6 +879,9 @@ public class PathFollowerEditor : Editor
         // 단축키 처리 (R키 회전 모드, Delete/Esc)
         HandleKeyboard();
 
+        // Alt+호버: 삽입 위치 + 아이콘 미리보기
+        HandleAltHoverPreview();
+
         // Alt+클릭: 세그먼트 위에 포인트 삽입
         HandleAltClickInsert();
 
@@ -893,6 +904,112 @@ public class PathFollowerEditor : Editor
         // 박스 선택 사각형 그리기
         if (_isBoxSelecting)
             DrawBoxRect();
+
+        // 좌측 하단 조작 가이드 오버레이 (마지막에 그려 최상위 표시)
+        DrawSceneOverlay(SceneView.currentDrawingSceneView);
+    }
+
+    #endregion
+
+    #region SceneView 오버레이 (조작 가이드)
+
+    private const string OverlayExpandedKey = "PathFollower.SceneOverlay.Expanded";
+
+    private static readonly string[] OverlayHelpLines =
+    {
+        "클릭 · 선택      Shift+클릭 · 추가 선택",
+        "클릭+드래그 · 이동   Ctrl+드래그 · 박스 선택",
+        "Ctrl+A · 전체 선택   Esc · 선택 해제",
+        "Alt+호버 · 삽입 미리보기(+)   Alt+클릭 · 삽입",
+        "P · 마우스 위치에 포인트 추가 (연속)",
+        "R · 핸들 회전 모드   Delete · 포인트 삭제",
+        "우클릭(포인트) · 컨텍스트 메뉴",
+    };
+
+    private static GUIStyle s_overlayHeaderStyle;
+    private static GUIStyle s_overlayLineStyle;
+
+    // 오버레이 영역 (마우스 입력 가드용, 이전 GUI 패스 값 재사용)
+    private Rect _overlayRect;
+    private Vector2 _overlayScroll;
+
+    /// <summary>마우스가 오버레이 패널 위에 있는지 검사 (씬 입력 핸들러 가드)</summary>
+    private bool IsMouseOverOverlay(Vector2 guiPos) => _overlayRect.Contains(guiPos);
+
+    /// <summary>SceneView 좌측 하단에 접을 수 있는 조작 가이드 패널을 그린다.</summary>
+    private void DrawSceneOverlay(SceneView sceneView)
+    {
+        if (sceneView == null || sceneView.camera == null) return;
+
+        if (s_overlayHeaderStyle == null)
+        {
+            s_overlayHeaderStyle = new GUIStyle(EditorStyles.boldLabel)
+            {
+                fontSize = 11,
+                normal   = { textColor = Color.white },
+            };
+            s_overlayLineStyle = new GUIStyle(EditorStyles.miniLabel)
+            {
+                fontSize = 10,
+                normal   = { textColor = new Color(0.85f, 0.85f, 0.85f) },
+            };
+        }
+
+        bool expanded = EditorPrefs.GetBool(OverlayExpandedKey, true);
+
+        const float width     = 285f;
+        const float pad       = 6f;
+        const float lineH     = 16f;
+        const float headerH   = 20f;
+        const float bottomGap = 48f;  // 유니티 하단 Overlay 메뉴(Tools, Tool Settings 등)와 겹침 방지 여백
+
+        float viewH    = sceneView.camera.pixelHeight / EditorGUIUtility.pixelsPerPoint;
+        float contentH = OverlayHelpLines.Length * lineH + 8f;
+        // 본문 최대 높이 = 뷰에서 실제로 쓸 수 있는 공간 전부. 공간이 충분하면 전체 표시,
+        // 뷰가 정말 낮을 때만 스크롤로 전환된다.
+        float bodyMaxH = Mathf.Max(lineH * 3f, viewH - bottomGap - headerH - pad * 2f - 20f);
+        float bodyH    = expanded ? Mathf.Min(contentH, bodyMaxH) : 0f;
+        bool needScroll = expanded && contentH > bodyMaxH;
+
+        float height = headerH + pad * 2f + (expanded ? bodyH + 2f : 0f);
+        _overlayRect = new Rect(10f, viewH - height - bottomGap, width, height);
+
+        Handles.BeginGUI();
+
+        // 반투명 배경
+        GUI.color = new Color(0.1f, 0.1f, 0.1f, 0.75f);
+        GUI.DrawTexture(_overlayRect, Texture2D.whiteTexture);
+        GUI.color = Color.white;
+
+        GUILayout.BeginArea(new Rect(
+            _overlayRect.x + pad, _overlayRect.y + pad,
+            _overlayRect.width - pad * 2f, _overlayRect.height - pad * 2f));
+
+        // 헤더: 폴딩 토글 버튼 + 상태 요약
+        string arrow  = expanded ? "▼" : "▶";
+        string status = $"{_follower.PointCount}pt";
+        if (_selectedIndices.Count > 0) status += $" · {_selectedIndices.Count} 선택";
+        if (_rotationMode) status += " · 회전 모드";
+
+        if (GUILayout.Button($"{arrow} PathFollower 가이드  ({status})", s_overlayHeaderStyle, GUILayout.Height(headerH)))
+        {
+            EditorPrefs.SetBool(OverlayExpandedKey, !expanded);
+            sceneView.Repaint();
+        }
+
+        if (expanded)
+        {
+            // 본문이 최대 높이를 넘으면 세로 스크롤
+            _overlayScroll = GUILayout.BeginScrollView(_overlayScroll, false, needScroll, GUILayout.Height(bodyH));
+            foreach (string line in OverlayHelpLines)
+                GUILayout.Label(line, s_overlayLineStyle, GUILayout.Height(lineH));
+            GUILayout.EndScrollView();
+
+            if (!needScroll) _overlayScroll = Vector2.zero;
+        }
+
+        GUILayout.EndArea();
+        Handles.EndGUI();
     }
 
     #endregion
@@ -931,7 +1048,8 @@ public class PathFollowerEditor : Editor
 
         // ── Pre-pass: MouseDown 시 가장 가까운 포인트를 즉시 선택 ──────────────────
         // 이벤트를 소비하지 않으므로 FreeMoveHandle이 동일 이벤트에서 드래그를 이어받을 수 있다.
-        if (e.type == EventType.MouseDown && e.button == 0 && !e.alt && !e.control)
+        if (e.type == EventType.MouseDown && e.button == 0 && !e.alt && !e.control
+            && !IsMouseOverOverlay(e.mousePosition))
         {
             int   nearestIdx  = -1;
             float nearestDist = CLICK_RADIUS; // 픽셀 임계값
@@ -1134,12 +1252,104 @@ public class PathFollowerEditor : Editor
 
     #endregion
 
+    #region Alt+호버: 삽입 위치 미리보기 (+ 아이콘)
+
+    private void HandleAltHoverPreview()
+    {
+        Event e = Event.current;
+
+        // Alt 해제 시 아이콘 제거
+        if (!e.alt)
+        {
+            if (_altHoverValid)
+            {
+                _altHoverValid = false;
+                SceneView.RepaintAll();
+            }
+            return;
+        }
+
+        // 매 GUI 패스(Layout)마다 호버 위치 갱신 → 카메라 이동/키 입력에도 항상 최신 상태 유지
+        if (e.type == EventType.Layout)
+        {
+            _altHoverValid = TryGetPathHoverPoint(e.mousePosition, out _altHoverWorldPos);
+        }
+        // 마우스 이동 시 재그리기 요청 (SceneView는 기본적으로 MouseMove에 리페인트하지 않음)
+        else if (e.type == EventType.MouseMove)
+        {
+            SceneView.RepaintAll();
+        }
+        else if (e.type == EventType.Repaint && _altHoverValid)
+        {
+            DrawAddIcon(_altHoverWorldPos);
+        }
+    }
+
+    /// <summary>마우스가 경로 곡선 위(삽입 가능 범위)에 있으면 해당 곡선 위 월드 좌표를 반환한다.</summary>
+    private bool TryGetPathHoverPoint(Vector2 mousePos, out Vector3 worldPos)
+    {
+        worldPos = Vector3.zero;
+
+        if (IsMouseOverOverlay(mousePos)) return false;
+
+        // 기존 포인트/핸들 근처는 삽입 불가 → 아이콘 표시 안 함 (Alt+클릭 판정과 동일 조건)
+        if (IsNearExistingPoint(mousePos)) return false;
+        if (!ScreenToWorld(mousePos, out Vector3 worldClick)) return false;
+        if (!FindClosestSegment(worldClick, out int segIdx, out float t)) return false;
+
+        worldPos = GetSegmentWorldPoint(segIdx, t);
+        return true;
+    }
+
+    /// <summary>세그먼트 위 t 위치의 곡선 월드 좌표를 반환한다.</summary>
+    private Vector3 GetSegmentWorldPoint(int segIndex, float t)
+    {
+        int count = _follower.PointCount;
+        int ni    = (_follower.IsLoop && segIndex == count - 1) ? 0 : segIndex + 1;
+
+        PathPoint p0 = _follower.GetPoint(segIndex);
+        PathPoint p1 = _follower.GetPoint(ni);
+
+        return EvalBezier(
+            _follower.PathToWorld(p0.position),
+            _follower.PathToWorld(p0.handleOut),
+            _follower.PathToWorld(p1.handleIn),
+            _follower.PathToWorld(p1.position),
+            t);
+    }
+
+    /// <summary>곡선 위 삽입 위치에 + 아이콘을 그린다.</summary>
+    private void DrawAddIcon(Vector3 worldPos)
+    {
+        Camera cam = Camera.current;
+        Vector3 normal = cam != null ? -cam.transform.forward : -_follower.transform.forward;
+        Vector3 right  = cam != null ? cam.transform.right    : Vector3.right;
+        Vector3 up     = cam != null ? cam.transform.up       : Vector3.up;
+
+        float size = HandleUtility.GetHandleSize(worldPos) * 0.14f;
+
+        // 배경 원 (테두리 대비용 어두운 원 + 초록 원)
+        Handles.color = new Color(0f, 0f, 0f, 0.5f);
+        Handles.DrawSolidDisc(worldPos, normal, size * 1.25f);
+        Handles.color = ColorPath;
+        Handles.DrawSolidDisc(worldPos, normal, size);
+
+        // 십자(+) 표시
+        float cross = size * 0.6f;
+        Handles.color = Color.white;
+        Handles.DrawLine(worldPos - right * cross, worldPos + right * cross, 2f);
+        Handles.DrawLine(worldPos - up    * cross, worldPos + up    * cross, 2f);
+    }
+
+    #endregion
+
     #region Alt+클릭: 세그먼트 위에 포인트 삽입
 
     private void HandleAltClickInsert()
     {
         Event e = Event.current;
         if (!e.alt || e.type != EventType.MouseDown || e.button != 0) return;
+        if (IsMouseOverOverlay(e.mousePosition)) return;
 
         // 기존 포인트/핸들 근처 클릭은 무시
         if (IsNearExistingPoint(e.mousePosition)) return;
@@ -1247,6 +1457,7 @@ public class PathFollowerEditor : Editor
     {
         Event e = Event.current;
         if (e.type != EventType.MouseDown || e.button != 1) return;
+        if (IsMouseOverOverlay(e.mousePosition)) return;
 
         int count = _follower.PointCount;
         for (int i = 0; i < count; i++)
@@ -1345,7 +1556,8 @@ public class PathFollowerEditor : Editor
         bool  isShift    = e.shift;
 
         // Ctrl+MouseDown → 박스 선택 시작
-        if (e.type == EventType.MouseDown && e.button == 0 && isCtrl)
+        if (e.type == EventType.MouseDown && e.button == 0 && isCtrl
+            && !IsMouseOverOverlay(e.mousePosition))
         {
             _isBoxSelecting = true;
             _boxAddMode     = isShift;
@@ -1426,6 +1638,14 @@ public class PathFollowerEditor : Editor
     {
         Event e = Event.current;
         if (e.type != EventType.KeyDown) return;
+
+        // P: 현재 마우스 커서 위치에 포인트 추가 (연속 추가 가능)
+        if (e.keyCode == KeyCode.P && !e.control && !e.command && !e.alt && !e.shift)
+        {
+            AddPointAtCursor(e.mousePosition);
+            e.Use();
+            return;
+        }
 
         // R: 회전 모드 토글
         if (e.keyCode == KeyCode.R && _selectedIndex >= 0)
@@ -1509,6 +1729,65 @@ public class PathFollowerEditor : Editor
         SceneView.RepaintAll();
     }
 
+    /// <summary>
+    /// P 단축키: 현재 마우스 커서 위치에 포인트를 경로 끝에 추가한다.
+    /// 핸들은 이전 곡선의 흐름 방향과 크기를 기반으로 자동 보정된다.
+    /// </summary>
+    private void AddPointAtCursor(Vector2 screenPos)
+    {
+        if (IsMouseOverOverlay(screenPos)) return;
+        if (!ScreenToWorld(screenPos, out Vector3 world)) return;
+
+        Undo.RecordObject(_follower, "Add PathPoint At Cursor");
+
+        Vector3 pathPos = _follower.WorldToPath(world);
+        if (_isUIMode) pathPos.z = 0f;
+
+        int lastIdx = _follower.PointCount - 1;
+        PathPoint last = _follower.GetPoint(lastIdx);
+
+        Vector3 toNew    = pathPos - last.position;
+        float   dist     = toNew.magnitude;
+        Vector3 dirToNew = dist > 1e-4f ? toNew / dist : Vector3.right;
+
+        // 이전 곡선의 진행 방향 (handleIn의 미러 방향 = 곡선이 빠져나가는 방향)
+        Vector3 prevFlow    = last.position - last.handleIn;
+        float   prevFlowLen = prevFlow.magnitude;
+        Vector3 outDir      = prevFlowLen > 1e-4f ? prevFlow / prevFlowLen : dirToNew;
+
+        // 핸들 길이: 새 세그먼트 길이(1/3)와 이전 핸들 크기를 절충하여 흐름 유지
+        float baseLen = dist / 3f;
+        float hLen    = prevFlowLen > 1e-4f
+            ? Mathf.Clamp((baseLen + prevFlowLen) * 0.5f, dist * 0.1f, dist * 0.5f)
+            : baseLen;
+        hLen = Mathf.Max(hLen, 1e-3f);
+
+        // 이전 포인트의 out 핸들 보정: 기존 흐름 방향 유지, 길이만 새 세그먼트에 맞춤
+        // (handleIn은 건드리지 않아 기존 곡선 형태가 보존된다. broken 포인트는 사용자 의도 존중)
+        if (!last.isBroken)
+        {
+            last.handleOut = last.position + outDir * hLen;
+            _follower.SetPoint(lastIdx, last);
+        }
+
+        // 새 포인트의 탄젠트: 이전 out 핸들 → 새 위치로 향하는 곡선 진입 방향
+        Vector3 fromHandle = pathPos - last.handleOut;
+        Vector3 tangent    = fromHandle.sqrMagnitude > 1e-8f ? fromHandle.normalized : dirToNew;
+
+        PathPoint newPoint = new PathPoint(pathPos)
+        {
+            handleIn  = pathPos - tangent * hLen,
+            handleOut = pathPos + tangent * hLen,
+            isBroken  = false
+        };
+        _follower.EditorInsertPoint(lastIdx + 1, newPoint);
+
+        SelectOnly(lastIdx + 1);
+        EditorUtility.SetDirty(_follower);
+        SceneView.RepaintAll();
+        Repaint();
+    }
+
     private void InsertPointBefore(int index)
     {
         Undo.RecordObject(_follower, "Insert PathPoint");
@@ -1589,6 +1868,9 @@ public class PathFollowerEditor : Editor
     private void StartEditorTest()
     {
         if (_isTestPlaying || _follower == null) return;
+        if (EditorApplication.timeSinceStartup < _suppressTestStartUntil) return;
+
+        EditorApplication.update -= OnEditorUpdate;
         _testStartTime = EditorApplication.timeSinceStartup;
         _isTestPlaying = true;
         EditorApplication.update += OnEditorUpdate;
@@ -1602,6 +1884,7 @@ public class PathFollowerEditor : Editor
     {
         EditorApplication.update -= OnEditorUpdate;
         _isTestPlaying = false;
+        _suppressTestStartUntil = EditorApplication.timeSinceStartup + TEST_RESTART_SUPPRESS_SECONDS;
         if (_follower != null)
         {
             Undo.RecordObject(_follower.transform, "Stop PathFollower Test");

@@ -3,6 +3,19 @@
 이 프로젝트의 주요 변경 사항을 기록합니다.
 형식은 [Keep a Changelog](https://keepachangelog.com/ko/1.1.0/)를 따르며, [Semantic Versioning](https://semver.org/lang/ko/)을 준수합니다.
 
+## [1.0.2] - 2026-08-15
+
+### Fixed
+
+- 에디트 모드에서 `PathFollower.OnValidate()`가 오브젝트 위치를 현재 진행도 기준으로 다시 쓰던 문제를 수정했습니다.
+- `PathRibbon`의 에디트 모드 UV 스크롤이 선택/마우스 이동 중 끊겨 보이던 문제를 방지했습니다. 스크롤은 Play Mode 또는 명시적인 10초 에디터 테스트 중에만 동작합니다.
+- 10초 에디터 테스트 종료 직후 남은 마우스 입력으로 테스트가 즉시 재시작될 수 있던 문제를 방지했습니다.
+
+### Changed
+
+- PathRibbon 스크롤 설정을 속도 직접 입력 대신 PathFollower 이동 시간과 동기화되는 `enableScroll`/`invertScroll` 방식으로 정리했습니다.
+- SceneView 경로 편집 가이드 오버레이, Alt 삽입 미리보기, P키 포인트 추가, 정점 균일화 도구를 추가했습니다.
+
 ## [1.0.1] - 2026-08-15
 
 ### Changed
